@@ -11,13 +11,13 @@ import logging
 # Add src directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from src.bot import TelegramBot
+from src.bot.telegram_bot_improved import TelegramBotImproved
 
 def main():
     """Main entry point for the application"""
     try:
-        # Create and run the bot
-        bot = TelegramBot()
+        # Create and run the improved bot
+        bot = TelegramBotImproved()
         bot.run()
         
     except KeyboardInterrupt:

@@ -3,18 +3,20 @@ from typing import List, Dict, Any
 import logging
 import os
 from datetime import timedelta
+from .timing_manager import SubtitleTimingManager
 
 logger = logging.getLogger(__name__)
 
 class SRTParser:
-    """Parser for SRT subtitle files"""
+    """Parser for SRT subtitle files with precise timing management"""
     
     def __init__(self):
         self.subtitles = None
         self.original_encoding = 'utf-8'
+        self.timing_manager = SubtitleTimingManager()
     
     def parse_file(self, file_path: str) -> List[Dict[str, Any]]:
-        """Parse SRT file and return list of subtitle entries"""
+        """Parse SRT file and return list of subtitle entries with precise timing"""
         try:
             # Try different encodings
             encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']
@@ -31,18 +33,40 @@ class SRTParser:
             if self.subtitles is None:
                 raise Exception("Could not parse SRT file with any supported encoding")
             
-            # Convert to our internal format
+            # Convert to our internal format with precise timing
             parsed_subtitles = []
             for i, subtitle in enumerate(self.subtitles):
-                parsed_subtitles.append({
+                # تولید خط تایمینگ
+                timing_line = f"{self._time_to_string(subtitle.start)} --> {self._time_to_string(subtitle.end)}"
+                
+                # تجزیه دقیق تایمینگ
+                timing_info = self.timing_manager.parse_timing_line(timing_line)
+                
+                subtitle_entry = {
                     'index': subtitle.index,
                     'start_time': self._time_to_string(subtitle.start),
                     'end_time': self._time_to_string(subtitle.end),
-                    'text': subtitle.text.replace('\n', ' '),  # Clean up line breaks
-                    'original_text': subtitle.text  # Keep original for reference
-                })
+                    'text': subtitle.text.replace('\n', ' ').strip(),  # Clean up line breaks
+                    'original_text': subtitle.text,  # Keep original for reference
+                    'timing_info': timing_info,  # اطلاعات دقیق تایمینگ
+                    'original_timing_line': timing_line  # خط تایمینگ اصلی
+                }
+                
+                parsed_subtitles.append(subtitle_entry)
             
-            logger.info(f"Parsed {len(parsed_subtitles)} subtitle entries")
+            # اعتبارسنجی تایمینگ
+            timing_errors = self.timing_manager.validate_timing_sequence(parsed_subtitles)
+            if timing_errors:
+                logger.warning(f"Timing validation found {len(timing_errors)} issues")
+                for error in timing_errors[:5]:  # نمایش 5 خطای اول
+                    logger.warning(f"Timing issue: {error}")
+            
+            # تحلیل آماری
+            timing_stats = self.timing_manager.analyze_timing_statistics(parsed_subtitles)
+            logger.info(f"Timing analysis: {timing_stats.get('total_subtitles', 0)} subtitles, "
+                       f"duration: {timing_stats.get('total_duration_formatted', 'unknown')}")
+            
+            logger.info(f"Parsed {len(parsed_subtitles)} subtitle entries with precise timing")
             return parsed_subtitles
             
         except Exception as e:
