@@ -1,3 +1,3 @@
-from .telegram_bot import TelegramBot
+from .telegram_bot_premium import TelegramBotPremium
 
-__all__ = ['TelegramBot']
+__all__ = ['TelegramBotPremium']
