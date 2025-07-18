@@ -36,7 +36,13 @@ def initialize_system():
         
         # Initialize backup manager
         backup_manager = get_backup_manager(settings.DATABASE_PATH)
-        logging.info("Backup manager initialized")
+        
+        # Create initial backup
+        initial_backup = backup_manager.create_backup("startup")
+        if initial_backup:
+            logging.info(f"Initial backup created: {initial_backup}")
+        
+        logging.info("Backup manager initialized and activated")
         
         # Create necessary directories
         os.makedirs(settings.TEMP_DIR, exist_ok=True)

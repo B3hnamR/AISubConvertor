@@ -2,8 +2,12 @@ import logging
 from typing import List, Dict, Any
 from ..translation import TranslatorFactory
 from ..subtitle import SRTParser, SubtitleTimingManager
-from ..utils import get_file_manager
-from config import settings
+from ..utils import (
+    get_file_manager, InputValidator, ValidationError,
+    handle_errors, TranslationError, FileProcessingError,
+    get_error_handler
+)
+from config import settings, get_dynamic_settings
 import os
 import asyncio
 
@@ -15,7 +19,14 @@ class TranslationService:
     def __init__(self):
         self.srt_parser = SRTParser()
         self.timing_manager = SubtitleTimingManager()
-        self.file_manager = get_file_manager(settings.TEMP_DIR, settings.MAX_FILE_SIZE_MB)
+        self.validator = InputValidator()
+        self.dynamic_settings = get_dynamic_settings()
+        self.error_handler = get_error_handler()
+        
+        # Initialize file manager with dynamic settings
+        max_file_size = self.dynamic_settings.get('file_settings.max_file_size_mb', settings.MAX_FILE_SIZE_MB)
+        self.file_manager = get_file_manager(settings.TEMP_DIR, max_file_size)
+        
         self.translator = None
         self._initialize_translator()
     
@@ -158,17 +169,42 @@ class TranslationService:
     
     # متدهای مدیریت فایل
     
+    @handle_errors(ValidationError, FileProcessingError, reraise=False)
     async def can_user_upload(self, user_id: int) -> bool:
         """بررسی امکان آپلود فایل برای کاربر"""
-        return await self.file_manager.can_upload_file(user_id)
+        try:
+            # Input validation
+            validated_user_id = self.validator.validate_user_id(user_id)
+            return await self.file_manager.can_upload_file(validated_user_id)
+        except ValidationError as e:
+            self.error_handler.log_error(e, {'user_id': user_id, 'method': 'can_user_upload'})
+            return False
     
+    @handle_errors(ValidationError, FileProcessingError, reraise=False)
     async def prepare_file_upload(self, user_id: int, filename: str, file_size: int) -> Dict[str, Any]:
         """آماده‌سازی آپلود فایل"""
-        return await self.file_manager.prepare_user_upload(user_id, filename, file_size)
+        try:
+            # Input validation
+            validated_user_id = self.validator.validate_user_id(user_id)
+            validated_filename = self.validator.validate_filename(filename)
+            validated_file_size = self.validator.validate_file_size(file_size)
+            
+            return await self.file_manager.prepare_user_upload(
+                validated_user_id, validated_filename, validated_file_size
+            )
+        except ValidationError as e:
+            self.error_handler.log_error(e, {
+                'user_id': user_id, 
+                'filename': filename, 
+                'file_size': file_size,
+                'method': 'prepare_file_upload'
+            })
+            raise FileProcessingError(f"اعتبارسنجی ناموفق: {str(e)}")
     
+    @handle_errors(TranslationError, FileProcessingError, reraise=True)
     async def process_user_file(self, user_id: int, file_path: str) -> str:
         """
-        پردازش کامل فایل کاربر با مدیریت تایمینگ دقیق
+        پردازش کام�� فایل کاربر با مدیریت تایمینگ دقیق
         
         Args:
             user_id: شناسه کاربر
@@ -178,29 +214,35 @@ class TranslationService:
             مسیر فایل ترجمه شده
         """
         try:
+            # Input validation
+            validated_user_id = self.validator.validate_user_id(user_id)
+            
             # شروع پردازش
-            await self.file_manager.start_file_processing(user_id)
+            await self.file_manager.start_file_processing(validated_user_id)
             
             # اعتبارسنجی فایل
             if not self.srt_parser.validate_srt_file(file_path):
-                raise Exception("فرمت فایل SRT نامعتبر است")
+                raise FileProcessingError("فرمت فایل SRT نامعتبر است")
             
             # تجزیه فایل با حفظ تایمینگ دقیق
-            logger.info(f"Parsing SRT file for user {user_id}: {file_path}")
+            logger.info(f"Parsing SRT file for user {validated_user_id}: {file_path}")
             original_subtitles = self.srt_parser.parse_file(file_path)
             
             if not original_subtitles:
-                raise Exception("هیچ زیرنویسی در فایل یافت نشد")
+                raise FileProcessingError("هیچ زیرنویسی در فایل یافت نشد")
             
             # استخراج متن‌ها برای ترجمه
             texts_to_translate = [subtitle['text'] for subtitle in original_subtitles]
             
             # ترجمه متن‌ها
-            logger.info(f"Translating {len(texts_to_translate)} subtitle entries for user {user_id}")
-            translated_texts = await self.translator.translate_batch(
-                texts_to_translate, 
-                settings.TARGET_LANGUAGE
-            )
+            logger.info(f"Translating {len(texts_to_translate)} subtitle entries for user {validated_user_id}")
+            try:
+                translated_texts = await self.translator.translate_batch(
+                    texts_to_translate, 
+                    settings.TARGET_LANGUAGE
+                )
+            except Exception as e:
+                raise TranslationError(f"خطا در ترجمه: {str(e)}")
             
             # حفظ تایمینگ اصلی در ترجمه
             translated_subtitles = self.timing_manager.preserve_timing_in_translation(
@@ -209,14 +251,14 @@ class TranslationService:
             )
             
             # تولید مسیر فایل خروجی
-            file_info = await self.file_manager.get_user_file_info(user_id)
+            file_info = await self.file_manager.get_user_file_info(validated_user_id)
             if not file_info:
-                raise Exception("اطلاعات فایل کاربر یافت نشد")
+                raise FileProcessingError("اطلاعات فایل کاربر یافت نشد")
             
             base_name = os.path.splitext(file_info['original_filename'])[0]
             output_file_path = os.path.join(
                 settings.OUTPUT_DIR,
-                f"user_{user_id}",
+                f"user_{validated_user_id}",
                 f"{base_name}_persian.srt"
             )
             
@@ -227,19 +269,33 @@ class TranslationService:
             final_path = self.srt_parser.save_srt_file(translated_subtitles, output_file_path)
             
             # تکمیل پردازش
-            await self.file_manager.complete_file_processing(user_id, final_path)
+            await self.file_manager.complete_file_processing(validated_user_id, final_path)
             
             # تحلیل آماری نهایی
             timing_stats = self.timing_manager.analyze_timing_statistics(translated_subtitles)
-            logger.info(f"Translation completed for user {user_id}: {timing_stats}")
+            logger.info(f"Translation completed for user {validated_user_id}: {timing_stats}")
             
             return final_path
             
-        except Exception as e:
-            logger.error(f"File processing failed for user {user_id}: {str(e)}")
+        except (ValidationError, TranslationError, FileProcessingError) as e:
+            self.error_handler.log_error(e, {
+                'user_id': user_id, 
+                'file_path': file_path,
+                'method': 'process_user_file'
+            })
             # پاکسازی در صورت خطا
             await self.file_manager.cleanup_user_files(user_id, force=True)
-            raise Exception(f"پردازش فایل ناموفق: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"File processing failed for user {user_id}: {str(e)}")
+            self.error_handler.log_error(e, {
+                'user_id': user_id, 
+                'file_path': file_path,
+                'method': 'process_user_file'
+            })
+            # پاکسازی در صورت خطا
+            await self.file_manager.cleanup_user_files(user_id, force=True)
+            raise FileProcessingError(f"پردازش فایل ناموفق: {str(e)}")
     
     async def get_user_preview(self, user_id: int, max_lines: int = 3) -> List[Dict[str, str]]:
         """

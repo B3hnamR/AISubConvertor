@@ -224,9 +224,13 @@ class TelegramBotPremium:
             reply_markup=reply_markup
         )
     
+    @handle_errors(ValidationError, FileProcessingError, TranslationError, reraise=False)
     async def handle_srt_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle SRT file uploads with subscription check"""
         try:
+            # Input validation
+            validator = InputValidator()
+            user_id = validator.validate_user_id(update.effective_user.id)
             document: Document = update.message.document
             user_id = update.effective_user.id
             start_time = time.time()
