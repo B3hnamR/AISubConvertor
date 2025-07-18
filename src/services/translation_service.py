@@ -105,6 +105,7 @@ class TranslationService:
             logger.error(f"Translation service failed: {str(e)}")
             raise Exception(f"Translation failed: {str(e)}")
     
+    @handle_errors(TranslationError, FileProcessingError, reraise=True)
     async def get_translation_preview(self, input_file_path: str, max_lines: int = 5) -> List[Dict[str, str]]:
         """
         Get a preview of translation for the first few lines
@@ -117,14 +118,18 @@ class TranslationService:
             List of dictionaries with original and translated text
         """
         try:
+            # Input validation
+            validated_path = self.validator.validate_file_path(input_file_path)
+            validated_max_lines = self.validator.validate_positive_integer(max_lines, "max_lines")
+            
             # Parse the SRT file
-            subtitles = self.srt_parser.parse_file(input_file_path)
+            subtitles = self.srt_parser.parse_file(validated_path)
             
             if not subtitles:
                 return []
             
             # Get first few subtitles for preview
-            preview_subtitles = subtitles[:max_lines]
+            preview_subtitles = subtitles[:validated_max_lines]
             texts_to_translate = [subtitle['text'] for subtitle in preview_subtitles]
             
             # Translate preview texts
@@ -144,28 +149,46 @@ class TranslationService:
             
             return preview_result
             
+        except (ValidationError, TranslationError, FileProcessingError) as e:
+            self.error_handler.log_error(e, {'method': 'get_translation_preview'})
+            raise
         except Exception as e:
             logger.error(f"Preview generation failed: {str(e)}")
-            raise Exception(f"Preview failed: {str(e)}")
+            self.error_handler.log_error(e, {'method': 'get_translation_preview'})
+            raise TranslationError(f"Preview failed: {str(e)}")
     
     def get_translator_info(self) -> Dict[str, Any]:
         """Get information about the current translator"""
-        if self.translator:
-            return {
-                'provider': self.translator.get_provider_name(),
-                'target_language': settings.TARGET_LANGUAGE,
-                'available_providers': TranslatorFactory.get_available_providers()
-            }
-        return {'provider': 'None', 'error': 'Translator not initialized'}
+        try:
+            target_lang = self.dynamic_settings.get('translation_settings.target_language', settings.TARGET_LANGUAGE)
+            
+            if self.translator:
+                return {
+                    'provider': self.translator.get_provider_name(),
+                    'target_language': target_lang,
+                    'available_providers': TranslatorFactory.get_available_providers()
+                }
+            return {'provider': 'None', 'error': 'Translator not initialized'}
+        except Exception as e:
+            logger.error(f"Failed to get translator info: {str(e)}")
+            return {'error': str(e)}
     
+    @handle_errors(ValidationError, TranslationError, reraise=True)
     def change_translator(self, provider: str, config: Dict[str, Any]):
         """Change the translation provider"""
         try:
-            self.translator = TranslatorFactory.create_translator(provider, config)
+            validated_provider = self.validator.validate_string(provider, "provider")
+            validated_config = self.validator.validate_dict(config, "config")
+            
+            self.translator = TranslatorFactory.create_translator(validated_provider, validated_config)
             logger.info(f"Changed translator to: {self.translator.get_provider_name()}")
+        except (ValidationError, TranslationError) as e:
+            self.error_handler.log_error(e, {'method': 'change_translator'})
+            raise
         except Exception as e:
             logger.error(f"Failed to change translator: {str(e)}")
-            raise Exception(f"Translator change failed: {str(e)}")
+            self.error_handler.log_error(e, {'method': 'change_translator'})
+            raise TranslationError(f"Translator change failed: {str(e)}")
     
     # متدهای مدیریت فایل
     
@@ -297,6 +320,7 @@ class TranslationService:
             await self.file_manager.cleanup_user_files(user_id, force=True)
             raise FileProcessingError(f"پردازش فایل ناموفق: {str(e)}")
     
+    @handle_errors(TranslationError, FileProcessingError, reraise=True)
     async def get_user_preview(self, user_id: int, max_lines: int = 3) -> List[Dict[str, str]]:
         """
         دریافت پیش‌نمایش ترجمه برای کاربر
@@ -309,18 +333,24 @@ class TranslationService:
             لیست پیش‌نمایش ترجمه
         """
         try:
+            # Input validation
+            validated_user_id = self.validator.validate_user_id(user_id)
+            validated_max_lines = self.validator.validate_positive_integer(max_lines, "max_lines")
+            
             # دریافت مسیر فایل کاربر
-            file_path = await self.file_manager.get_user_file_path(user_id)
+            file_path = await self.file_manager.get_user_file_path(validated_user_id)
             if not file_path:
-                raise Exception("فایلی برای پیش‌نمایش یافت نشد")
+                logger.warning(f"No file found for preview for user {validated_user_id}")
+                return []
             
             # تجزیه فایل
             subtitles = self.srt_parser.parse_file(file_path)
             if not subtitles:
+                logger.warning(f"No subtitles found in file for user {validated_user_id}")
                 return []
             
             # انتخاب زیرنویس‌های اول
-            preview_subtitles = subtitles[:max_lines]
+            preview_subtitles = subtitles[:validated_max_lines]
             texts_to_translate = [subtitle['text'] for subtitle in preview_subtitles]
             
             # ترجمه پیش‌نمایش
@@ -341,28 +371,45 @@ class TranslationService:
                     'duration_ms': timing_info.get('duration_ms', 0)
                 })
             
+            logger.info(f"Preview generated successfully for user {validated_user_id}")
             return preview_result
             
+        except (ValidationError, TranslationError, FileProcessingError) as e:
+            self.error_handler.log_error(e, {'user_id': user_id, 'method': 'get_user_preview'})
+            raise
         except Exception as e:
             logger.error(f"Preview generation failed for user {user_id}: {str(e)}")
-            raise Exception(f"تولید پیش‌نمایش ناموفق: {str(e)}")
+            self.error_handler.log_error(e, {'user_id': user_id, 'method': 'get_user_preview'})
+            raise TranslationError(f"تولید پیش‌نمایش ناموفق: {str(e)}")
     
+    @handle_errors(FileProcessingError, reraise=False)
     async def cleanup_user_data(self, user_id: int) -> bool:
         """پاکسازی داده‌های کاربر"""
-        return await self.file_manager.cleanup_user_files(user_id)
+        try:
+            validated_user_id = self.validator.validate_user_id(user_id)
+            success = await self.file_manager.cleanup_user_files(validated_user_id)
+            logger.info(f"Cleanup {'successful' if success else 'failed'} for user {validated_user_id}")
+            return success
+        except ValidationError as e:
+            self.error_handler.log_error(e, {'user_id': user_id, 'method': 'cleanup_user_data'})
+            return False
     
     async def get_system_status(self) -> Dict[str, Any]:
         """دریافت وضعیت سیستم"""
-        file_stats = await self.file_manager.get_system_stats()
-        translator_info = self.get_translator_info()
-        
-        return {
-            'file_manager': file_stats,
-            'translator': translator_info,
-            'settings': {
-                'max_file_size_mb': settings.MAX_FILE_SIZE_MB,
-                'target_language': settings.TARGET_LANGUAGE,
-                'temp_dir': settings.TEMP_DIR,
-                'output_dir': settings.OUTPUT_DIR
+        try:
+            file_stats = await self.file_manager.get_system_stats()
+            translator_info = self.get_translator_info()
+            
+            return {
+                'file_manager': file_stats,
+                'translator': translator_info,
+                'settings': {
+                    'max_file_size_mb': settings.MAX_FILE_SIZE_MB,
+                    'target_language': settings.TARGET_LANGUAGE,
+                    'temp_dir': settings.TEMP_DIR,
+                    'output_dir': settings.OUTPUT_DIR
+                }
             }
-        }
+        except Exception as e:
+            logger.error(f"Failed to get system status: {str(e)}")
+            return {'error': str(e)}

@@ -56,18 +56,23 @@ class UserFileManager:
         return hashlib.md5(content.encode()).hexdigest()[:12]
     
     def _sanitize_filename(self, filename: str) -> str:
-        """ایمن‌سازی نام فایل"""
+        """ایمن‌سازی نام فایل با جلوگیری از path traversal"""
         if not filename:
             return "unknown.srt"
         
-        # حذف کاراکترهای خطرناک
-        safe_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
-        safe_filename = "".join(c for c in filename if c in safe_chars)
+        # حذف کاراکترهای خطرناک و path traversal
+        safe_filename = "".join(c for c in filename if c.isalnum() or c in '._-')
+        safe_filename = safe_filename.replace('..', '').replace('/', '').replace('\\', '')
         
         # اطمینان از وجود پسوند
-        if not safe_filename.endswith('.srt'):
+        if not safe_filename.lower().endswith('.srt'):
             safe_filename += '.srt'
         
+        # محدودیت طول نام فایل
+        if len(safe_filename) > 255:
+            safe_filename = safe_filename[:255]
+        
+        logger.debug(f"Sanitized filename: {filename} -> {safe_filename}")
         return safe_filename
     
     async def can_upload_file(self, user_id: int) -> bool:

@@ -60,15 +60,22 @@ class UserService:
         """دریافت محدودیت ترجمه رایگان از تنظیمات پویا"""
         return self.dynamic_settings.get('free_plan.translations_limit', 1)
     
+    @handle_errors(DatabaseError, reraise=False)
     async def register_user(self, user_id: int, username: str = None, 
                            first_name: str = None, last_name: str = None) -> Dict[str, Any]:
         """ثبت‌نام کاربر جدید"""
         try:
+            # Input validation
+            validated_user_id = self.validator.validate_user_id(user_id)
+            validated_username = self.validator.validate_string(username, "username", required=False)
+            validated_first_name = self.validator.validate_string(first_name, "first_name", required=False)
+            validated_last_name = self.validator.validate_string(last_name, "last_name", required=False)
+            
             # بررسی وجود کاربر
-            existing_user = self.db.get_user(user_id)
+            existing_user = self.db.get_user(validated_user_id)
             if existing_user:
                 # بهروزرسانی آخرین فعالیت
-                self.db.update_user_activity(user_id)
+                self.db.update_user_activity(validated_user_id)
                 return {
                     'success': True,
                     'is_new': False,
@@ -77,23 +84,27 @@ class UserService:
                 }
             
             # ایجاد کاربر جدید
-            success = self.db.create_user(user_id, username, first_name, last_name)
+            success = self.db.create_user(validated_user_id, validated_username, validated_first_name, validated_last_name)
             if success:
-                user = self.db.get_user(user_id)
+                user = self.db.get_user(validated_user_id)
+                logger.info(f"New user registered: {validated_user_id}")
                 return {
                     'success': True,
                     'is_new': True,
                     'user': user,
-                    'message': 'حساب شما با موفقیت ایجاد شد! یک ترجمه رایگان در اختیار دارید.'
+                    'message': f'حساب شما با موفقیت ایجاد شد! {self.free_translations_limit} ترجمه رایگان در اختیار دارید.'
                 }
             else:
-                return {
-                    'success': False,
-                    'message': 'خطا در ایجاد حساب کاربری'
-                }
+                raise DatabaseError('خطا در ایجاد حساب کاربری')
                 
-        except Exception as e:
+        except (ValidationError, DatabaseError) as e:
             logger.error(f"User registration failed for {user_id}: {str(e)}")
+            return {
+                'success': False,
+                'message': f'خطا در ثبت‌نام: {str(e)}'
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error in register_user for {user_id}: {str(e)}")
             return {
                 'success': False,
                 'message': 'خطای سیستمی در ثبت‌نام'
