@@ -1,9 +1,11 @@
 import sqlite3
 import json
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from enum import Enum
 import logging
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +23,52 @@ class SubscriptionStatus(Enum):
     PENDING = "pending"
 
 class DatabaseManager:
-    """مدیریت پایگاه داده SQLite"""
+    """مدیریت پایگاه داده SQLite با Thread Safety"""
     
     def __init__(self, db_path: str = "aisubconvertor.db"):
         self.db_path = db_path
+        self._lock = threading.RLock()  # Reentrant lock for nested calls
+        self._local = threading.local()  # Thread-local storage for connections
         self.init_database()
+    
+    @contextmanager
+    def get_connection(self):
+        """دریافت connection thread-safe با context manager"""
+        with self._lock:
+            try:
+                # استفاده از connection pool ساده
+                if not hasattr(self._local, 'connection'):
+                    self._local.connection = sqlite3.connect(
+                        self.db_path,
+                        timeout=30.0,  # 30 second timeout
+                        check_same_thread=False
+                    )
+                    # تنظیمات بهینه‌سازی
+                    self._local.connection.execute("PRAGMA journal_mode=WAL")
+                    self._local.connection.execute("PRAGMA synchronous=NORMAL")
+                    self._local.connection.execute("PRAGMA cache_size=10000")
+                    self._local.connection.execute("PRAGMA temp_store=memory")
+                
+                yield self._local.connection
+                
+            except Exception as e:
+                # در صورت خطا، connection را ببند
+                if hasattr(self._local, 'connection'):
+                    try:
+                        self._local.connection.close()
+                    except:
+                        pass
+                    delattr(self._local, 'connection')
+                raise e
+    
+    def close_connection(self):
+        """بستن connection thread فعلی"""
+        if hasattr(self._local, 'connection'):
+            try:
+                self._local.connection.close()
+            except:
+                pass
+            delattr(self._local, 'connection')
     
     def init_database(self):
         """ایجاد جداول پایگاه داده"""
@@ -109,8 +152,12 @@ class DatabaseManager:
     
     def get_user(self, user_id: int) -> Optional[Dict]:
         """دریافت اطلاعات کاربر"""
+        if not isinstance(user_id, int) or user_id <= 0:
+            logger.warning(f"Invalid user_id: {user_id}")
+            return None
+            
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self.get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 
@@ -126,7 +173,10 @@ class DatabaseManager:
                 row = cursor.fetchone()
                 if row:
                     user_data = dict(row)
-                    user_data['settings'] = json.loads(user_data.get('settings', '{}'))
+                    try:
+                        user_data['settings'] = json.loads(user_data.get('settings', '{}'))
+                    except json.JSONDecodeError:
+                        user_data['settings'] = {}
                     return user_data
                 return None
                 

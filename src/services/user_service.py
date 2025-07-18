@@ -2,28 +2,63 @@ import logging
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from ..database import get_database, UserRole, SubscriptionStatus
+from ..utils import InputValidator, ValidationError, handle_errors, DatabaseError
+from config import get_dynamic_settings
+import re
 
 logger = logging.getLogger(__name__)
+
+def safe_parse_datetime(date_string: str) -> Optional[datetime]:
+    """تبدیل ایمن رشته تاریخ به datetime"""
+    if not date_string:
+        return None
+    
+    try:
+        # حذف Z و +00:00 از انتهای رشته
+        cleaned_date = date_string.replace('Z', '').replace('+00:00', '')
+        
+        # فرمت‌های مختلف SQLite
+        formats = [
+            '%Y-%m-%d %H:%M:%S.%f',  # با microsecond
+            '%Y-%m-%d %H:%M:%S',     # بدون microsecond
+            '%Y-%m-%d',              # فقط تاریخ
+        ]
+        
+        for fmt in formats:
+            try:
+                return datetime.strptime(cleaned_date, fmt)
+            except ValueError:
+                continue
+        
+        # اگر هیچ فرمت کار نکرد، از regex استفاده کن
+        match = re.match(r'(\d{4}-\d{2}-\d{2})', cleaned_date)
+        if match:
+            return datetime.strptime(match.group(1), '%Y-%m-%d')
+        
+        logger.warning(f"Could not parse datetime: {date_string}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"DateTime parsing error for '{date_string}': {str(e)}")
+        return None
 
 class UserService:
     """سرویس مدیریت کاربران و اشتراک‌ها"""
     
     def __init__(self):
         self.db = get_database()
-        self.subscription_plans = {
-            'monthly': {
-                'name': 'اشتراک ماهانه',
-                'duration_days': 30,
-                'price': 50000,  # تومان
-                'features': ['ترجمه نامحدود', 'پشتیبانی اولویت‌دار', 'کیفیت بالا']
-            },
-            'yearly': {
-                'name': 'اشتراک سالانه',
-                'duration_days': 365,
-                'price': 500000,  # تومان (تخفیف 17%)
-                'features': ['ترجمه نامحدود', 'پشتیبانی اولویت‌دار', 'کیفیت بالا', '17% تخفیف']
-            }
-        }
+        self.validator = InputValidator()
+        self.dynamic_settings = get_dynamic_settings()
+    
+    @property
+    def subscription_plans(self):
+        """دریافت طرح‌های اشتراک از تنظیمات پویا"""
+        return self.dynamic_settings.get_all_subscription_plans()
+    
+    @property
+    def free_translations_limit(self):
+        """دریافت محدودیت ترجمه رایگان از تنظیمات پویا"""
+        return self.dynamic_settings.get('free_plan.translations_limit', 1)
     
     async def register_user(self, user_id: int, username: str = None, 
                            first_name: str = None, last_name: str = None) -> Dict[str, Any]:
@@ -78,8 +113,8 @@ class UserService:
             # بررسی اشتراک فعال
             if user.get('subscription_status') == 'active':
                 # بررسی تاریخ انقضا
-                end_date = datetime.fromisoformat(user['subscription_end'].replace('Z', '+00:00'))
-                if end_date > datetime.now():
+                end_date = safe_parse_datetime(user.get('subscription_end', ''))
+                if end_date and end_date > datetime.now():
                     return {
                         'allowed': True,
                         'type': 'premium',
@@ -201,13 +236,14 @@ class UserService:
             
             # اطلاعات اشتراک
             if user.get('subscription_status') == 'active':
-                end_date = datetime.fromisoformat(user['subscription_end'].replace('Z', '+00:00'))
-                profile['subscription'] = {
-                    'plan_type': user['plan_type'],
-                    'status': user['subscription_status'],
-                    'end_date': user['subscription_end'],
-                    'remaining_days': (end_date - datetime.now()).days
-                }
+                end_date = safe_parse_datetime(user.get('subscription_end', ''))
+                if end_date:
+                    profile['subscription'] = {
+                        'plan_type': user['plan_type'],
+                        'status': user['subscription_status'],
+                        'end_date': user['subscription_end'],
+                        'remaining_days': max(0, (end_date - datetime.now()).days)
+                    }
             
             return profile
             

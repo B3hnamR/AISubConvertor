@@ -8,9 +8,14 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram.constants import ParseMode
 import aiofiles
 
-from config import settings
+from config import settings, get_dynamic_settings
 from ..services import TranslationService, UserService, AdminService
 from ..database import get_database
+from ..utils import (
+    InputValidator, ValidationError, handle_errors, 
+    get_error_handler, DatabaseError, TranslationError,
+    FileProcessingError, get_backup_manager
+)
 
 # Configure logging
 logging.basicConfig(

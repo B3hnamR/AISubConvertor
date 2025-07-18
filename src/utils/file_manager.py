@@ -3,6 +3,7 @@ import shutil
 import asyncio
 import hashlib
 import time
+import weakref
 from typing import Dict, Optional, Set
 from pathlib import Path
 import logging
@@ -18,6 +19,7 @@ class UserFileManager:
     - پاکسازی خودکار
     - جلوگیری از تداخل
     - محدودیت همزمانی
+    - حل مشکل Memory Leak
     """
     
     def __init__(self, base_temp_dir: str, max_file_size_mb: int = 50):
@@ -53,10 +55,28 @@ class UserFileManager:
         content = f"{user_id}_{filename}_{timestamp}"
         return hashlib.md5(content.encode()).hexdigest()[:12]
     
+    def _sanitize_filename(self, filename: str) -> str:
+        """ایمن‌سازی نام فایل"""
+        if not filename:
+            return "unknown.srt"
+        
+        # حذف کاراکترهای خطرناک
+        safe_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        safe_filename = "".join(c for c in filename if c in safe_chars)
+        
+        # اطمینان از وجود پسوند
+        if not safe_filename.endswith('.srt'):
+            safe_filename += '.srt'
+        
+        return safe_filename
+    
     async def can_upload_file(self, user_id: int) -> bool:
         """بررسی امکان آپلود فایل جدید برای کاربر"""
+        if not isinstance(user_id, int) or user_id <= 0:
+            return False
+            
         async with self._get_user_lock(user_id):
-            # ب��رسی وجود فایل فعال
+            # بررسی وجود فایل فعال
             if user_id in self.active_files:
                 active_file = self.active_files[user_id]
                 # بررسی اینکه فایل هنوز در حال پردازش است
@@ -66,10 +86,18 @@ class UserFileManager:
     
     async def validate_file_size(self, file_size: int) -> bool:
         """اعتبارسنجی حجم فایل"""
-        return file_size <= self.max_file_size_bytes
+        return isinstance(file_size, int) and 0 < file_size <= self.max_file_size_bytes
     
     async def prepare_user_upload(self, user_id: int, filename: str, file_size: int) -> Optional[Dict]:
         """آماده‌سازی برای آپلود فایل کاربر"""
+        # Input validation
+        if not isinstance(user_id, int) or user_id <= 0:
+            raise ValueError("Invalid user_id")
+        if not isinstance(filename, str) or not filename.strip():
+            raise ValueError("Invalid filename")
+        if not isinstance(file_size, int) or file_size <= 0:
+            raise ValueError("Invalid file_size")
+        
         async with self._get_user_lock(user_id):
             try:
                 # بررسی امکان آپلود
@@ -227,12 +255,35 @@ class UserFileManager:
                 user_dir.rmdir()
                 logger.info(f"Deleted empty user directory: {user_dir}")
             
+            # پاکسازی memory leak: حذف lock و task اگر کاربر دیگر فعال نیست
+            self._cleanup_user_resources(user_id)
+            
             logger.info(f"Cleanup completed for user {user_id}")
             return True
             
         except Exception as e:
             logger.error(f"Cleanup failed for user {user_id}: {str(e)}")
             return False
+    
+    def _cleanup_user_resources(self, user_id: int):
+        """پاکسازی منابع حافظه برای کاربر غیرفعال"""
+        try:
+            # اگر کاربر فایل فعال ندارد، lock و task را پاک کن
+            if user_id not in self.active_files:
+                # پاک کردن lock
+                if user_id in self.user_locks:
+                    del self.user_locks[user_id]
+                    logger.debug(f"Cleaned up lock for user {user_id}")
+                
+                # پاک کردن cleanup task
+                if user_id in self.cleanup_tasks:
+                    if not self.cleanup_tasks[user_id].done():
+                        self.cleanup_tasks[user_id].cancel()
+                    del self.cleanup_tasks[user_id]
+                    logger.debug(f"Cleaned up task for user {user_id}")
+        
+        except Exception as e:
+            logger.error(f"Failed to cleanup resources for user {user_id}: {str(e)}")
     
     def _schedule_cleanup(self, user_id: int, delay_minutes: int = 5):
         """برنامه‌ریزی پاکسازی خودکار"""
@@ -259,6 +310,7 @@ class UserFileManager:
                 try:
                     await asyncio.sleep(3600)  # هر ساعت
                     await self._cleanup_old_files()
+                    await self._cleanup_orphaned_resources()
                 except Exception as e:
                     logger.error(f"Periodic cleanup failed: {str(e)}")
         
@@ -277,17 +329,38 @@ class UserFileManager:
             await self.cleanup_user_files(user_id, force=True)
             logger.info(f"Force cleaned up old files for user {user_id}")
     
-    def _sanitize_filename(self, filename: str) -> str:
-        """ایمن‌سازی نام فایل"""
-        # حذف کاراکترهای خطرناک
-        safe_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
-        safe_filename = "".join(c for c in filename if c in safe_chars)
+    async def _cleanup_orphaned_resources(self):
+        """پاکسازی منابع یتیم (locks و tasks بدون فایل فعال)"""
+        try:
+            # پیدا کردن locks یتیم
+            orphaned_locks = []
+            for user_id in list(self.user_locks.keys()):
+                if user_id not in self.active_files:
+                    orphaned_locks.append(user_id)
+            
+            # پاک کردن locks یتیم
+            for user_id in orphaned_locks:
+                del self.user_locks[user_id]
+                logger.debug(f"Cleaned up orphaned lock for user {user_id}")
+            
+            # پیدا کردن tasks یتیم
+            orphaned_tasks = []
+            for user_id in list(self.cleanup_tasks.keys()):
+                if user_id not in self.active_files:
+                    orphaned_tasks.append(user_id)
+            
+            # پاک کردن tasks یتیم
+            for user_id in orphaned_tasks:
+                if not self.cleanup_tasks[user_id].done():
+                    self.cleanup_tasks[user_id].cancel()
+                del self.cleanup_tasks[user_id]
+                logger.debug(f"Cleaned up orphaned task for user {user_id}")
+            
+            if orphaned_locks or orphaned_tasks:
+                logger.info(f"Cleaned up {len(orphaned_locks)} orphaned locks and {len(orphaned_tasks)} orphaned tasks")
         
-        # اطمینان از وجود پسوند
-        if not safe_filename.endswith('.srt'):
-            safe_filename += '.srt'
-        
-        return safe_filename
+        except Exception as e:
+            logger.error(f"Failed to cleanup orphaned resources: {str(e)}")
     
     async def get_system_stats(self) -> Dict:
         """دریافت آمار سیستم"""
@@ -304,7 +377,11 @@ class UserFileManager:
             'active_files': total_active_files,
             'total_size_mb': round(total_size / (1024 * 1024), 2),
             'status_breakdown': status_counts,
-            'base_directory': str(self.base_temp_dir)
+            'base_directory': str(self.base_temp_dir),
+            'memory_usage': {
+                'active_locks': len(self.user_locks),
+                'active_tasks': len(self.cleanup_tasks)
+            }
         }
 
 # سینگلتون برای استفاده در سراسر برنامه
