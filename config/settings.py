@@ -21,6 +21,15 @@ class Settings:
     TEMP_DIR = os.getenv('TEMP_DIR', './temp')
     OUTPUT_DIR = os.getenv('OUTPUT_DIR', './output')
     
+    # Database Settings
+    DATABASE_PATH = os.getenv('DATABASE_PATH', './aisubconvertor.db')
+    
+    # Admin Settings
+    SUPER_ADMIN_IDS = [int(x.strip()) for x in os.getenv('SUPER_ADMIN_IDS', '').split(',') if x.strip()]
+    
+    # Subscription Settings
+    FREE_TRANSLATIONS_LIMIT = int(os.getenv('FREE_TRANSLATIONS_LIMIT', 1))
+    
     # Logging
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     

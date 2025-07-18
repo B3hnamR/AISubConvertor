@@ -4,3 +4,4 @@ python-dotenv==1.0.0
 pysrt==1.1.2
 aiofiles==23.2.0
 asyncio==3.4.3
+sqlite3
